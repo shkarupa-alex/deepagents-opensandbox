@@ -64,16 +64,20 @@ class OpensandboxProvider(SandboxProvider):
                 Set to ``True`` when the SDK cannot reach container IPs
                 directly (e.g. server runs in Docker, client on host).
         """
-        self._api_key = api_key or os.environ.get("OPEN_SANDBOX_API_KEY")
-        self._domain = domain or os.environ.get("OPEN_SANDBOX_DOMAIN")
-        self._protocol = protocol
-        self._use_server_proxy = use_server_proxy
+        api_key = api_key or os.environ.get("OPEN_SANDBOX_API_KEY")
+        domain = domain or os.environ.get("OPEN_SANDBOX_DOMAIN")
 
         self._connection_config = ConnectionConfigSync(
-            api_key=self._api_key,
-            domain=self._domain,
-            protocol=self._protocol,
-            use_server_proxy=self._use_server_proxy,
+            api_key=api_key,
+            domain=domain,
+            protocol=protocol,
+            use_server_proxy=use_server_proxy,
+        )
+        self._async_connection_config = ConnectionConfig(
+            api_key=api_key,
+            domain=domain,
+            protocol=protocol,
+            use_server_proxy=use_server_proxy,
         )
 
         # Cache of active sandbox backends keyed by sandbox ID
@@ -155,13 +159,12 @@ class OpensandboxProvider(SandboxProvider):
         if backend is None:
             return
 
-        sandbox = backend._sandbox  # noqa: SLF001
         try:
-            sandbox.kill()
+            backend.kill()
         except Exception:  # noqa: BLE001
             logger.debug("Error killing sandbox %s", sandbox_id, exc_info=True)
         try:
-            sandbox.close()
+            backend.close()
         except Exception:  # noqa: BLE001
             logger.debug("Error closing sandbox %s", sandbox_id, exc_info=True)
 
@@ -201,17 +204,10 @@ class OpensandboxProvider(SandboxProvider):
         if sandbox_id is not None and sandbox_id in self._active:
             return self._active[sandbox_id]
 
-        async_config = ConnectionConfig(
-            api_key=self._api_key,
-            domain=self._domain,
-            protocol=self._protocol,
-            use_server_proxy=self._use_server_proxy,
-        )
-
         if sandbox_id is not None:
             async_sandbox = await Sandbox.connect(
                 sandbox_id,
-                connection_config=async_config,
+                connection_config=self._async_connection_config,
                 connect_timeout=timedelta(seconds=ready_timeout),
             )
         else:
@@ -220,7 +216,7 @@ class OpensandboxProvider(SandboxProvider):
                 timeout=timedelta(seconds=timeout),
                 ready_timeout=timedelta(seconds=ready_timeout),
                 resource=resource,
-                connection_config=async_config,
+                connection_config=self._async_connection_config,
             )
 
         # Create a sync wrapper — health check already passed above.
@@ -272,15 +268,14 @@ class OpensandboxProvider(SandboxProvider):
                 logger.debug("Error async-closing sandbox %s", sandbox_id, exc_info=True)
         elif backend is not None:
             # Created via sync path — fall back to sync kill.
-            sandbox = backend._sandbox  # noqa: SLF001
             try:
-                sandbox.kill()
+                backend.kill()
             except Exception:  # noqa: BLE001
                 logger.debug("Error killing sandbox %s", sandbox_id, exc_info=True)
 
         # Always close local sync resources.
         if backend is not None:
             try:
-                backend._sandbox.close()  # noqa: SLF001
+                backend.close()
             except Exception:  # noqa: BLE001
                 logger.debug("Error closing sandbox %s", sandbox_id, exc_info=True)

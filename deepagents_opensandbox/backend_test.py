@@ -1,6 +1,7 @@
 """Tests for OpensandboxBackend."""
 
 import uuid
+from collections.abc import Generator
 from unittest.mock import MagicMock
 
 import pytest
@@ -166,48 +167,39 @@ def test_download_files_permission_denied(mock_sandbox: MagicMock) -> None:
 # --- Integration tests (require OPEN_SANDBOX_DOMAIN) ---
 
 
+@pytest.fixture(scope="module")
+def integration_backend() -> Generator[OpensandboxBackend]:
+    """Create a shared integration sandbox for backend tests."""
+    from datetime import timedelta
+
+    from opensandbox.config.connection_sync import ConnectionConfigSync
+    from opensandbox.sync.sandbox import SandboxSync
+
+    config = ConnectionConfigSync(use_server_proxy=True)
+    sandbox = SandboxSync.create("python:3.11", ready_timeout=timedelta(seconds=120), connection_config=config)
+    backend = OpensandboxBackend(sandbox=sandbox)
+    yield backend
+    sandbox.kill()
+    sandbox.close()
+
+
 @pytest.mark.skipif(not integration_server_available(), reason="No OpenSandbox server available")
-def test_integration_execute() -> None:
+def test_integration_execute(integration_backend: OpensandboxBackend) -> None:
     """Integration test: basic command execution."""
-    from datetime import timedelta
-
-    from opensandbox.config.connection_sync import ConnectionConfigSync
-    from opensandbox.sync.sandbox import SandboxSync
-
-    config = ConnectionConfigSync(use_server_proxy=True)
-    sandbox = SandboxSync.create("python:3.11", ready_timeout=timedelta(seconds=120), connection_config=config)
-    try:
-        backend = OpensandboxBackend(sandbox=sandbox)
-        result = backend.execute("echo 'Hello, World!'")
-        assert result.exit_code == 0
-        assert "Hello, World!" in result.output
-    finally:
-        sandbox.kill()
-        sandbox.close()
+    result = integration_backend.execute("echo 'Hello, World!'")
+    assert result.exit_code == 0
+    assert "Hello, World!" in result.output
 
 
 @pytest.mark.skipif(not integration_server_available(), reason="No OpenSandbox server available")
-def test_integration_upload_download() -> None:
+def test_integration_upload_download(integration_backend: OpensandboxBackend) -> None:
     """Integration test: file upload and download."""
-    from datetime import timedelta
+    test_content = b"Hello, this is test content!\nWith multiple lines."
+    test_path = "/tmp/test_upload.txt"
 
-    from opensandbox.config.connection_sync import ConnectionConfigSync
-    from opensandbox.sync.sandbox import SandboxSync
+    upload_responses = integration_backend.upload_files([(test_path, test_content)])
+    assert upload_responses[0].error is None
 
-    config = ConnectionConfigSync(use_server_proxy=True)
-    sandbox = SandboxSync.create("python:3.11", ready_timeout=timedelta(seconds=120), connection_config=config)
-    try:
-        backend = OpensandboxBackend(sandbox=sandbox)
-
-        test_content = b"Hello, this is test content!\nWith multiple lines."
-        test_path = "/tmp/test_upload.txt"
-
-        upload_responses = backend.upload_files([(test_path, test_content)])
-        assert upload_responses[0].error is None
-
-        download_responses = backend.download_files([test_path])
-        assert download_responses[0].error is None
-        assert download_responses[0].content == test_content
-    finally:
-        sandbox.kill()
-        sandbox.close()
+    download_responses = integration_backend.download_files([test_path])
+    assert download_responses[0].error is None
+    assert download_responses[0].content == test_content

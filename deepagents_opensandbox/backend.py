@@ -57,6 +57,14 @@ class OpensandboxBackend(BaseSandbox):
         """Return the unique identifier for this sandbox."""
         return self._sandbox.id
 
+    def kill(self) -> None:
+        """Kill the sandbox container."""
+        self._sandbox.kill()
+
+    def close(self) -> None:
+        """Close the sandbox connection."""
+        self._sandbox.close()
+
     def execute(
         self,
         command: str,

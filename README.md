@@ -56,6 +56,25 @@ sandbox.close()
 | `OPEN_SANDBOX_API_KEY`    | API key for authentication           | *(none)*         |
 | `OPEN_SANDBOX_DOMAIN`     | OpenSandbox server domain            | `localhost:8080` |
 
+### Server proxy mode
+
+By default, the SDK connects directly to sandbox container IPs. This works when the client and sandbox containers share the same network (e.g. both on the host, or in the same Docker/Kubernetes network).
+
+When the OpenSandbox **server runs inside Docker** and the client runs on the **host machine**, container IPs (like `host.docker.internal`) are not reachable from the host. In this case, enable server proxy mode so that all execd requests are routed through the server:
+
+```python
+provider = OpensandboxProvider(use_server_proxy=True)
+```
+
+| Deployment                              | `use_server_proxy` |
+|-----------------------------------------|--------------------|
+| Server native on host, client on host   | `False` (default)  |
+| Server in Docker, client on host        | `True`             |
+| Server in Docker, client in same network| `False`            |
+| Kubernetes with proper networking       | `False`            |
+
+> **Note:** OpenSandbox server `v0.1.4` and earlier have a [bug](https://github.com/alibaba/OpenSandbox) where the proxy handler drops query parameters on GET requests, causing file downloads to fail with `400 MISSING_QUERY`. The fix is merged into `main` but not yet released. If you hit this issue, build the server image from source (`server/` directory).
+
 ## Development
 
 This project uses `uv` for dependency management.
@@ -87,10 +106,10 @@ uv run python -m pytest deepagents_opensandbox/ -v
 
 **Run Integration Tests**
 
-These tests verify behavior against a real OpenSandbox server.
+These tests verify behavior against a real OpenSandbox server. They use `use_server_proxy=True` since the test runner is on the host while the server is in Docker.
 
 ```bash
-OPEN_SANDBOX_DOMAIN=localhost:8080 uv run python -m pytest deepagents_opensandbox/ -v -k integration
+OPEN_SANDBOX_DOMAIN=localhost:8090 uv run python -m pytest deepagents_opensandbox/ -v -k integration
 ```
 
 ### Linting

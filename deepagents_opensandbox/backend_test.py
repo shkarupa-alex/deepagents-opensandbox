@@ -171,9 +171,11 @@ def test_integration_execute() -> None:
     """Integration test: basic command execution."""
     from datetime import timedelta
 
+    from opensandbox.config.connection_sync import ConnectionConfigSync
     from opensandbox.sync.sandbox import SandboxSync
 
-    sandbox = SandboxSync.create("python:3.11", ready_timeout=timedelta(seconds=120))
+    config = ConnectionConfigSync(use_server_proxy=True)
+    sandbox = SandboxSync.create("python:3.11", ready_timeout=timedelta(seconds=120), connection_config=config)
     try:
         backend = OpensandboxBackend(sandbox=sandbox)
         result = backend.execute("echo 'Hello, World!'")
@@ -189,9 +191,11 @@ def test_integration_upload_download() -> None:
     """Integration test: file upload and download."""
     from datetime import timedelta
 
+    from opensandbox.config.connection_sync import ConnectionConfigSync
     from opensandbox.sync.sandbox import SandboxSync
 
-    sandbox = SandboxSync.create("python:3.11", ready_timeout=timedelta(seconds=120))
+    config = ConnectionConfigSync(use_server_proxy=True)
+    sandbox = SandboxSync.create("python:3.11", ready_timeout=timedelta(seconds=120), connection_config=config)
     try:
         backend = OpensandboxBackend(sandbox=sandbox)
 

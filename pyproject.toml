@@ -30,6 +30,7 @@ cli = ["deepagents-cli>=0.0.27"]
 dev = [
     "deepagents-cli>=0.0.27",
     "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
     "pytest-mock>=3.15.1",
     "ruff>=0.14.13",
 ]

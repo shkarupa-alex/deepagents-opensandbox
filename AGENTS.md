@@ -1,7 +1,7 @@
 # AGENTS.md
 
 ## Project Overview
-`deepagents-opensandbox` is a Python package that implements a sandbox backend for the [DeepAgents](https://github.com/shkarupa-alex/deepagents) framework using [OpenSandbox](https://github.com/nicholasgriffintn/OpenSandbox). It allows DeepAgents to execute code and commands in isolated OpenSandbox environments.
+`deepagents-opensandbox` is a Python package that implements a sandbox backend for the [DeepAgents](https://github.com/shkarupa-alex/deepagents) framework using [OpenSandbox](https://github.com/alibaba/OpenSandbox). It allows DeepAgents to execute code and commands in isolated OpenSandbox environments.
 
 - **Language**: Python 3.11+
 - **Dependency Manager**: `uv`
@@ -19,64 +19,52 @@ deepagents-opensandbox/
 │   └── provider_test.py        # Provider unit and integration tests
 ├── pyproject.toml              # Project configuration and dependencies
 ├── uv.lock                     # Dependency lock file
+├── docker-compose.yaml         # Local dev server (OpenSandbox in Docker)
 └── AGENTS.md                   # Documentation for AI coding agents
 ```
 
 ## Architecture
 
-This package provides two main components in the `deepagents_opensandbox` package:
+### 1. `OpensandboxBackend` (`backend.py`)
+- Inherits from `BaseSandbox` from `deepagents.backends.sandbox`.
+- Wraps `SandboxSync` for execute/upload/download.
+- Command execution via `sandbox.commands.run()` + `sandbox.commands.get_command_status()`.
+- File upload via `sandbox.files.write_file()`, download via `sandbox.files.read_bytes()`.
 
-### 1. `OpensandboxProvider` (`provider.py`)
+### 2. `OpensandboxProvider` (`provider.py`)
 - Inherits from `SandboxProvider` from `deepagents_cli.integrations.sandbox_provider`.
-- Responsible for the lifecycle of sandboxes (create, connect, delete).
-- Uses `SandboxSync.create()` / `SandboxSync.connect()` from the OpenSandbox SDK.
+- Lifecycle management: create, connect, delete (sync + async).
+- Async path (`aget_or_create`) uses native async SDK (`Sandbox`) for non-blocking creation, then wraps in sync `SandboxSync` backend.
 - Configuration via env vars: `OPEN_SANDBOX_API_KEY`, `OPEN_SANDBOX_DOMAIN`.
 
-### 2. `OpensandboxBackend` (`backend.py`)
-- Inherits from `BaseSandbox` from `deepagents.backends.sandbox`.
-- Represents a single active sandbox instance wrapping `SandboxSync`.
-- Command execution via `sandbox.commands.run()` + `sandbox.commands.get_command_status()`.
-- File upload via `sandbox.files.write_file()`.
-- File download via `sandbox.files.read_bytes()`.
+## Commands
+
+- **Unit tests**: `uv run python -m pytest deepagents_opensandbox/ -v -k "not integration"`
+- **Integration tests**: `OPEN_SANDBOX_DOMAIN=localhost:8090 uv run python -m pytest deepagents_opensandbox/ -v -k integration`
+- **All tests**: `OPEN_SANDBOX_DOMAIN=localhost:8090 uv run python -m pytest deepagents_opensandbox/ -v`
+- **Lint**: `uv run ruff check deepagents_opensandbox/`
+- **Format check**: `uv run ruff format --check deepagents_opensandbox/`
+
+## Server proxy mode
+
+The SDK can talk to sandbox containers in two ways:
+
+1. **Direct** (`use_server_proxy=False`, default): SDK connects to container IP/port directly. Works when client and containers are on the same network.
+2. **Server proxy** (`use_server_proxy=True`): All execd requests go through the OpenSandbox server at `OPEN_SANDBOX_DOMAIN`. Required when the client cannot reach container IPs (e.g. server in Docker, client on host — `host.docker.internal` is not resolvable from macOS host).
+
+`use_server_proxy` defaults to `False` in `OpensandboxProvider`. Integration tests pass `True` explicitly because they run from the host against a Docker-based server. Our docker-compose setup runs the server in Docker with `host_ip = "host.docker.internal"`.
+
+## Known issues
+
+- **Server ≤ v0.1.4**: proxy handler in `lifecycle.py` drops query parameters on GET requests (builds `target_url` without `request.url.query`). File downloads via proxy return `400 MISSING_QUERY`. Fixed in `main` (not yet released). Workaround: build server image from source. Our docker-compose uses a locally-built image with this fix.
 
 ## Development Standards
 
-### Dependency Management
-This project uses `uv` for all dependency management and running commands.
-- **Install dependencies**: `uv sync`
-- **Add dependency**: `uv add <package>`
-- **Add dev dependency**: `uv add --dev <package>`
-
 ### Code Style
-- **Formatter/Linter**: `ruff` is used for linting and formatting. Configuration is in `pyproject.toml`.
-- **Type Hints**: Strict typing is enforced.
-- **Docstrings**: Google-style docstrings are required for public APIs.
+- **Formatter/Linter**: `ruff` (configuration in `pyproject.toml`).
+- **Type Hints**: Strict typing enforced.
+- **Docstrings**: Google-style for public APIs.
 
 ### Testing
-Tests are located in `*_test.py` files alongside the source code.
-
-#### Unit Tests (Mocked)
-Tests that do not require a running OpenSandbox server. These mock SDK calls.
-```bash
-uv run pytest deepagents_opensandbox/ -v
-```
-
-#### Integration Tests (Real Server)
-Tests that run against a live OpenSandbox server.
-```bash
-OPEN_SANDBOX_DOMAIN=localhost:8080 uv run pytest deepagents_opensandbox/ -v -k integration
-```
-
-### Verification
-```bash
-uv run ruff check deepagents_opensandbox/
-uv run ruff format --check deepagents_opensandbox/
-uv run pytest deepagents_opensandbox/ -v
-```
-
-## Key Files
-- `pyproject.toml`: Project configuration, dependencies, and tool settings.
-- `deepagents_opensandbox/backend.py`: Backend implementation.
-- `deepagents_opensandbox/provider.py`: Provider implementation.
-- `deepagents_opensandbox/backend_test.py`: Tests for the backend.
-- `deepagents_opensandbox/provider_test.py`: Tests for the provider.
+- Tests are in `*_test.py` files alongside source code.
+- Integration tests are gated by `OPEN_SANDBOX_DOMAIN` env var and a TCP connectivity check (`integration_server_available()` in `conftest.py`).

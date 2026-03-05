@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["deepagents_opensandbox"]
+exclude = ["*_test.py", "conftest.py"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["*_test.py", "conftest.py"]
+
+[project]
+name = "deepagents-opensandbox"
+dynamic = ["version"]
+description = "Opensandbox backend for DeepAgents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "deepagents>=0.4.5",
+    "opensandbox>=0.1.5",
+]
+
+[project.optional-dependencies]
+cli = ["deepagents-cli>=0.0.27"]
+
+[dependency-groups]
+dev = [
+    "deepagents-cli>=0.0.27",
+    "pytest>=9.0.2",
+    "pytest-mock>=3.15.1",
+    "ruff>=0.14.13",
+]
+
+[tool.ruff]
+fix = true
+unsafe-fixes = true
+line-length = 120
+target-version = "py311"
+exclude = [".venv", "migrations/versions"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["EM", "TRY003", "D1", "FA", "COM812", "RET504", "ASYNC109"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+no-lines-before = ["standard-library"]
+
+[tool.ruff.lint.extend-per-file-ignores]
+"*_test.py" = ["S101", "S108", "S311", "PLR2004", "PLC0415"]
+"conftest.py" = ["PLC0415"]
+
+[tool.mypy]
+strict = true
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers"]
+xfail_strict = true
+
+[tool.coverage.report]
+exclude_also = ["if typing.TYPE_CHECKING:"]

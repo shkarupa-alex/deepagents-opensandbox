@@ -85,6 +85,8 @@ class OpensandboxBackend(BaseSandbox):
         if timeout is not None:
             opts = RunCommandOpts(timeout=timedelta(seconds=timeout))
 
+        display_cmd = command[:200] + ("..." if len(command) > 200 else "")
+        logger.info("Executing command: %s", display_cmd)
         execution = self._sandbox.commands.run(command, opts=opts)
 
         # Collect stdout and stderr from execution logs

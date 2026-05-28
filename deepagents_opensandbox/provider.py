@@ -1,20 +1,17 @@
-"""Opensandbox provider for DeepAgents.
+"""OpenSandbox Provider for DeepAgents.
 
-This module provides OpensandboxProvider, a sandbox provider that manages
-the lifecycle of OpenSandbox containers using both synchronous and
+Manages the lifecycle of OpenSandbox containers using both synchronous and
 asynchronous OpenSandbox SDKs.
 """
 
+import asyncio
 import logging
 import os
 from datetime import timedelta
 from typing import Any
 
 from deepagents.backends.protocol import SandboxBackendProtocol
-from deepagents_cli.integrations.sandbox_provider import SandboxProvider
-from opensandbox.config.connection import ConnectionConfig
 from opensandbox.config.connection_sync import ConnectionConfigSync
-from opensandbox.sandbox import Sandbox
 from opensandbox.sync.sandbox import SandboxSync
 
 from deepagents_opensandbox.backend import OpensandboxBackend
@@ -22,23 +19,23 @@ from deepagents_opensandbox.backend import OpensandboxBackend
 logger = logging.getLogger(__name__)
 
 
-class OpensandboxProvider(SandboxProvider):
-    """Opensandbox provider for managing sandbox lifecycle.
+class OpensandboxProvider:
+    """OpenSandbox provider for managing sandbox lifecycle.
 
-    This provider creates, connects to, and deletes OpenSandbox containers.
-    It integrates with the DeepAgents CLI via the ``SandboxProvider`` interface.
+    Creates, connects to, and deletes OpenSandbox containers.
+    Integrates with DeepAgents CLI via the ``SandboxProvider`` interface.
 
-    Both synchronous (``get_or_create`` / ``delete``) and native asynchronous
-    (``aget_or_create`` / ``adelete``) methods are supported.
+    Supports both synchronous (``get_or_create`` / ``delete``) and
+    native asynchronous (``aget_or_create`` / ``adelete``) interfaces.
 
     Example:
         ```python
         from deepagents_opensandbox import OpensandboxProvider
 
         provider = OpensandboxProvider()
-        sandbox = provider.get_or_create(image="python:3.11")
-        result = sandbox.execute("python --version")
-        provider.delete(sandbox_id=sandbox.id)
+        backend = provider.get_or_create(image="opensandbox/code-interpreter:v1.0.2")
+        result = backend.execute("python --version")
+        provider.delete(sandbox_id=backend.id)
         ```
     """
 
@@ -73,19 +70,9 @@ class OpensandboxProvider(SandboxProvider):
             protocol=protocol,
             use_server_proxy=use_server_proxy,
         )
-        self._async_connection_config = ConnectionConfig(
-            api_key=api_key,
-            domain=domain,
-            protocol=protocol,
-            use_server_proxy=use_server_proxy,
-        )
 
         # Cache of active sandbox backends keyed by sandbox ID
         self._active: dict[str, OpensandboxBackend] = {}
-
-        # Async Sandbox instances kept alive for native async delete.
-        # Populated only when sandboxes are created via aget_or_create().
-        self._async_sandboxes: dict[str, Sandbox] = {}
 
     # ------------------------------------------------------------------
     # Synchronous interface
@@ -95,13 +82,19 @@ class OpensandboxProvider(SandboxProvider):
         self,
         *,
         sandbox_id: str | None = None,
-        image: str = "python:3.11",
+        image: str = "opensandbox/code-interpreter:v1.0.2",
         timeout: int = 600,
         ready_timeout: int = 120,
         resource: dict[str, str] | None = None,
+        metadata: dict[str, str] | None = None,
+        entrypoint: list[str] | None = None,
         **kwargs: Any,  # noqa: ANN401, ARG002
     ) -> SandboxBackendProtocol:
         """Get an existing sandbox or create a new one.
+
+        First checks local cache and remote connection by sandbox_id;
+        if not found, searches by metadata session_id;
+        otherwise creates a new sandbox with the given metadata.
 
         Args:
             sandbox_id: ID of an existing sandbox to connect to.
@@ -111,32 +104,86 @@ class OpensandboxProvider(SandboxProvider):
             ready_timeout: Max seconds to wait for sandbox to become ready.
                 Default: 120.
             resource: Resource limits (e.g. ``{"cpu": "1", "memory": "2Gi"}``).
+            metadata: Custom metadata (e.g. ``{"session_id": "xxx"}``).
+            entrypoint: Container entrypoint command. Default: ``None``
+                (use image default).
             **kwargs: Additional arguments (ignored).
 
         Returns:
             OpensandboxBackend instance connected to the sandbox.
         """
         if sandbox_id is not None and sandbox_id in self._active:
+            logger.info(f"[OpensandboxProvider] sandbox {sandbox_id} found in local cache")
             return self._active[sandbox_id]
 
+        sandbox = None
+
+        # Try to connect to remote sandbox by sandbox_id first
         if sandbox_id is not None:
-            sandbox = SandboxSync.connect(
-                sandbox_id,
-                connection_config=self._connection_config,
-                connect_timeout=timedelta(seconds=ready_timeout),
-            )
-        else:
+            try:
+                sandbox = SandboxSync.connect(
+                    sandbox_id,
+                    connection_config=self._connection_config,
+                )
+                logger.info(f"[OpensandboxProvider] sandbox {sandbox_id} connected remotely")
+            except Exception as e:
+                logger.info(f"[OpensandboxProvider] connect {sandbox_id} failed: {e}")
+
+        # If remote connect failed, try searching by metadata
+        if sandbox is None and metadata:
+            sandbox = self._find_by_metadata(metadata)
+            if sandbox:
+                logger.info(f"[OpensandboxProvider] sandbox found by metadata {metadata}")
+
+        if sandbox is None:
             sandbox = SandboxSync.create(
                 image,
                 timeout=timedelta(seconds=timeout),
+                entrypoint=entrypoint,
                 ready_timeout=timedelta(seconds=ready_timeout),
                 resource=resource,
+                metadata=metadata,
                 connection_config=self._connection_config,
             )
+            logger.info(f"[OpensandboxProvider] sandbox created, id={getattr(sandbox, 'id', sandbox)}, metadata={metadata}")
 
         backend = OpensandboxBackend(sandbox=sandbox)
         self._active[backend.id] = backend
         return backend
+
+    def _find_by_metadata(self, metadata: dict[str, str]) -> "SandboxSync | None":
+        """Find existing sandbox by metadata.
+
+        Checks local cache first, then queries the server via
+        SandboxManager.list_sandbox_infos.
+        """
+        # Check local cache first
+        for backend_id, backend in self._active.items():
+            sandbox_meta = getattr(backend._sandbox, "metadata", {}) or {}
+            if all(sandbox_meta.get(k) == v for k, v in metadata.items()):
+                logger.info(f"[OpensandboxProvider] found sandbox in local cache: {backend_id}")
+                return backend._sandbox
+
+        # Query server via SandboxManagerSync
+        try:
+            from opensandbox import SandboxManagerSync
+            from opensandbox.models.sandboxes import SandboxFilter
+
+            sync_mgr = SandboxManagerSync.create(connection_config=self._connection_config)
+            filter_obj = SandboxFilter(metadata=metadata)
+            result = sync_mgr.list_sandbox_infos(filter_obj)
+
+            if result.sandbox_infos:
+                info = result.sandbox_infos[0]
+                logger.info(f"[OpensandboxProvider] found sandbox on server by metadata: {info.id}")
+                return SandboxSync.connect(
+                    info.id,
+                    connection_config=self._connection_config,
+                )
+        except Exception as e:
+            logger.info(f"[OpensandboxProvider] find by metadata failed: {e}")
+
+        return None
 
     def delete(
         self,
@@ -154,7 +201,6 @@ class OpensandboxProvider(SandboxProvider):
             **kwargs: Additional arguments (ignored).
         """
         backend = self._active.pop(sandbox_id, None)
-        self._async_sandboxes.pop(sandbox_id, None)
 
         if backend is None:
             return
@@ -176,17 +222,17 @@ class OpensandboxProvider(SandboxProvider):
         self,
         *,
         sandbox_id: str | None = None,
-        image: str = "python:3.11",
+        image: str = "opensandbox/code-interpreter:v1.0.2",
         timeout: int = 600,
         ready_timeout: int = 120,
         resource: dict[str, str] | None = None,
-        **kwargs: Any,  # noqa: ANN401, ARG002
+        metadata: dict[str, str] | None = None,
+        entrypoint: list[str] | None = None,
+        **kwargs: Any,  # noqa: ANN401
     ) -> SandboxBackendProtocol:
         """Async version of :meth:`get_or_create`.
 
-        Uses the native async OpenSandbox SDK (``Sandbox``) for
-        non-blocking sandbox creation and health-check polling, then
-        wraps the result in a sync ``SandboxSync`` backend.
+        Reuses the sync implementation via ``asyncio.to_thread``.
 
         Args:
             sandbox_id: ID of an existing sandbox to connect to.
@@ -196,53 +242,35 @@ class OpensandboxProvider(SandboxProvider):
             ready_timeout: Max seconds to wait for sandbox to become ready.
                 Default: 120.
             resource: Resource limits (e.g. ``{"cpu": "1", "memory": "2Gi"}``).
+            metadata: Custom metadata (e.g. ``{"session_id": "xxx"}``).
+            entrypoint: Container entrypoint command. Default: ``None``
+                (use image default).
             **kwargs: Additional arguments (ignored).
 
         Returns:
             OpensandboxBackend instance connected to the sandbox.
         """
-        if sandbox_id is not None and sandbox_id in self._active:
-            return self._active[sandbox_id]
-
-        if sandbox_id is not None:
-            async_sandbox = await Sandbox.connect(
-                sandbox_id,
-                connection_config=self._async_connection_config,
-                connect_timeout=timedelta(seconds=ready_timeout),
-            )
-        else:
-            async_sandbox = await Sandbox.create(
-                image,
-                timeout=timedelta(seconds=timeout),
-                ready_timeout=timedelta(seconds=ready_timeout),
-                resource=resource,
-                connection_config=self._async_connection_config,
-            )
-
-        # Create a sync wrapper — health check already passed above.
-        sync_sandbox = SandboxSync.connect(
-            async_sandbox.id,
-            connection_config=self._connection_config,
-            skip_health_check=True,
+        return await asyncio.to_thread(
+            self.get_or_create,
+            sandbox_id=sandbox_id,
+            image=image,
+            timeout=timeout,
+            ready_timeout=ready_timeout,
+            resource=resource,
+            metadata=metadata,
+            entrypoint=entrypoint,
+            **kwargs,
         )
-
-        # Keep async sandbox alive for native async kill in adelete().
-        self._async_sandboxes[async_sandbox.id] = async_sandbox
-
-        backend = OpensandboxBackend(sandbox=sync_sandbox)
-        self._active[backend.id] = backend
-        return backend
 
     async def adelete(
         self,
         *,
         sandbox_id: str,
-        **kwargs: Any,  # noqa: ANN401, ARG002
+        **kwargs: Any,  # noqa: ANN401
     ) -> None:
         """Async version of :meth:`delete`.
 
-        Uses the native async SDK when the sandbox was created via
-        :meth:`aget_or_create`; otherwise falls back to sync kill/close.
+        Reuses the sync implementation via ``asyncio.to_thread``.
 
         This method is idempotent.
 
@@ -250,32 +278,4 @@ class OpensandboxProvider(SandboxProvider):
             sandbox_id: ID of the sandbox to delete.
             **kwargs: Additional arguments (ignored).
         """
-        backend = self._active.pop(sandbox_id, None)
-        async_sandbox = self._async_sandboxes.pop(sandbox_id, None)
-
-        if backend is None and async_sandbox is None:
-            return
-
-        # Prefer native async kill if available.
-        if async_sandbox is not None:
-            try:
-                await async_sandbox.kill()
-            except Exception:  # noqa: BLE001
-                logger.debug("Error async-killing sandbox %s", sandbox_id, exc_info=True)
-            try:
-                await async_sandbox.close()
-            except Exception:  # noqa: BLE001
-                logger.debug("Error async-closing sandbox %s", sandbox_id, exc_info=True)
-        elif backend is not None:
-            # Created via sync path — fall back to sync kill.
-            try:
-                backend.kill()
-            except Exception:  # noqa: BLE001
-                logger.debug("Error killing sandbox %s", sandbox_id, exc_info=True)
-
-        # Always close local sync resources.
-        if backend is not None:
-            try:
-                backend.close()
-            except Exception:  # noqa: BLE001
-                logger.debug("Error closing sandbox %s", sandbox_id, exc_info=True)
+        await asyncio.to_thread(self.delete, sandbox_id=sandbox_id, **kwargs)
